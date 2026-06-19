@@ -7,6 +7,7 @@ live in connectors (they don't know about storage) or API routes (they
 don't know about embeddings): dedup, embedding, and scoring.
 """
 
+import math
 import os
 from datetime import datetime, timezone
 from typing import Any
@@ -170,6 +171,8 @@ class IngestionService:
                 similarity * temperature * authority * usage_boost * contradiction_penalty
             )
 
+            freshness_warning = self._freshness_warning(meta)
+
             results.append({
                 "artifact_id": meta.get("artifact_id", ""),
                 "title": meta.get("title", ""),
@@ -185,6 +188,8 @@ class IngestionService:
                     "temperature": round(temperature, 4),
                 },
                 "timestamp_event": meta.get("timestamp_event", ""),
+                "freshness_warning": freshness_warning,
+                "contradiction_alert": None,  # populated by Day 3 contradiction detector
             })
 
             if len(results) >= n_results:
@@ -192,6 +197,107 @@ class IngestionService:
 
         results.sort(key=lambda r: r["scores"]["composite"], reverse=True)
         return results
+
+    def run_decay_cycle(self) -> dict[str, Any]:
+        """
+        Apply thermodynamic temperature decay to every artifact in the collection.
+
+        Formula (from CLAUDE.md):
+            T(t) = T_ambient + (T(t-1) - T_ambient) * exp(-k * delta_t)
+
+        delta_t is in days since the artifact was last ingested.
+        Only artifacts whose temperature shifts by more than 0.01 are logged
+        so noise-free cycles stay silent.
+        """
+        T_AMBIENT = 0.10
+        DECAY_K = 0.01  # per day; at k=0.01 half-life ≈ 69 days
+
+        all_items = self.collection.get(include=["metadatas"])
+        ids = all_items["ids"]
+        metas = all_items["metadatas"]
+
+        if not ids:
+            return {"checked": 0, "updated": 0}
+
+        now = datetime.now(timezone.utc)
+        updated_ids: list[str] = []
+        updated_metas: list[dict[str, Any]] = []
+        logged = 0
+
+        for artifact_id, meta in zip(ids, metas):
+            t_prev = float(meta.get("temperature", 1.0))
+
+            ingested_str = meta.get("timestamp_ingested", "")
+            if not ingested_str:
+                continue
+            try:
+                ingested = datetime.fromisoformat(ingested_str)
+            except ValueError:
+                continue
+
+            if ingested.tzinfo is None:
+                ingested = ingested.replace(tzinfo=timezone.utc)
+
+            delta_days = (now - ingested).total_seconds() / 86400.0
+            t_new = T_AMBIENT + (t_prev - T_AMBIENT) * math.exp(-DECAY_K * delta_days)
+            t_new = max(T_AMBIENT, min(1.0, t_new))
+
+            if abs(t_new - t_prev) < 0.001:
+                continue
+
+            new_meta = dict(meta)
+            new_meta["temperature"] = t_new
+            updated_ids.append(artifact_id)
+            updated_metas.append(new_meta)
+
+            if abs(t_new - t_prev) > 0.01:
+                title = meta.get("title", artifact_id)[:50]
+                print(
+                    f"[decay] {title!r}  "
+                    f"{t_prev:.4f} → {t_new:.4f}  "
+                    f"(age {delta_days:.1f}d)"
+                )
+                logged += 1
+
+        if updated_ids:
+            self.collection.update(ids=updated_ids, metadatas=updated_metas)
+
+        return {"checked": len(ids), "updated": len(updated_ids), "logged": logged}
+
+    def _freshness_warning(self, meta: dict[str, Any]) -> str | None:
+        """
+        Return a human-readable warning when temperature < 0.5.
+
+        We compute age from timestamp_event (when the fact was true in the
+        source system) rather than timestamp_ingested so the warning reflects
+        the actual knowledge age, not when we pulled it.
+        """
+        temperature = float(meta.get("temperature", 1.0))
+        if temperature >= 0.5:
+            return None
+
+        ts_str = meta.get("timestamp_event", "")
+        if not ts_str:
+            return "This result may be stale"
+
+        try:
+            ts = datetime.fromisoformat(ts_str)
+        except ValueError:
+            return "This result may be stale"
+
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+
+        age_days = (datetime.now(timezone.utc) - ts).days
+        if age_days < 1:
+            return None  # sub-day articles can't be stale enough to warn
+        if age_days == 1:
+            return "This result is 1 day old"
+        if age_days < 30:
+            return f"This result is {age_days} days old"
+        months = age_days // 30
+        unit = "month" if months == 1 else "months"
+        return f"This result is {months} {unit} old"
 
     def _has_access(
         self,

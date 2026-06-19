@@ -7,6 +7,7 @@ initialized once at startup rather than per-request — the model load takes
 ~2 seconds and the persistent client needs a stable handle across requests.
 """
 
+import asyncio
 import os
 from contextlib import asynccontextmanager
 from typing import Any
@@ -17,12 +18,25 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from .connectors.github import GitHubConnector
+from .connectors.markdown import MarkdownConnector
 from .services.ingestion import IngestionService
 
 load_dotenv()
 
 # Shared service instance — initialized once during lifespan.
 _ingestion: IngestionService | None = None
+
+DECAY_INTERVAL_SECONDS = int(os.getenv("DECAY_INTERVAL_SECONDS", "60"))
+
+
+async def _decay_loop() -> None:
+    """Run freshness decay on a fixed interval for the lifetime of the process."""
+    while True:
+        await asyncio.sleep(DECAY_INTERVAL_SECONDS)
+        if _ingestion is not None:
+            stats = _ingestion.run_decay_cycle()
+            if stats["updated"]:
+                print(f"[decay] cycle done — {stats}")
 
 
 @asynccontextmanager
@@ -31,7 +45,9 @@ async def lifespan(app: FastAPI):
     data_dir = os.getenv("DATA_DIR", "./data")
     _ingestion = IngestionService(data_dir=data_dir)
     print(f"[startup] ChromaDB ready at {data_dir}/chroma")
+    task = asyncio.create_task(_decay_loop())
     yield
+    task.cancel()
     print("[shutdown] Closing down")
 
 
@@ -58,6 +74,10 @@ class IngestRequest(BaseModel):
     owner: str
     repo: str
     limit: int = 50
+
+
+class MarkdownIngestRequest(BaseModel):
+    directory_path: str
 
 
 class IngestResponse(BaseModel):
@@ -107,6 +127,24 @@ def ingest(req: IngestRequest) -> IngestResponse:
     return IngestResponse(
         stats=stats,
         message=f"Ingested from {req.owner}/{req.repo}",
+    )
+
+
+@app.post("/ingest/markdown", response_model=IngestResponse)
+def ingest_markdown(req: MarkdownIngestRequest) -> IngestResponse:
+    if _ingestion is None:
+        raise HTTPException(status_code=503, detail="Service not ready")
+
+    connector = MarkdownConnector()
+    try:
+        events = connector.get_events(req.directory_path)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    stats = _ingestion.ingest_events(events)
+    return IngestResponse(
+        stats=stats,
+        message=f"Ingested markdown from {req.directory_path}",
     )
 
 

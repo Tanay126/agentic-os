@@ -96,16 +96,21 @@ NEO4J_PASSWORD=agentikos
 - [x] .gitignore created
 - [x] CLAUDE.md created
 
-### TODO (Day 2 — current priority)
-- [ ] FastAPI main.py — wire up the app with lifespan, CORS, routers
-- [ ] GET /health endpoint
-- [ ] POST /ingest endpoint — trigger GitHub ingestion via API
-- [ ] POST /query endpoint — composite scoring retrieval with citations
-- [ ] Freshness decay service — background task, runs every hour
-- [ ] Authority scoring — by source type at retrieval time
-- [ ] Markdown connector — ingest local .md files
-- [ ] requirements.txt — freeze current dependencies
-- [ ] Git init + first commit
+### DONE (Day 2)
+- [x] FastAPI main.py — lifespan, CORS, routers wired
+- [x] GET /health endpoint
+- [x] POST /ingest endpoint — GitHub PRs + Issues via API
+- [x] POST /query endpoint — composite scoring retrieval with citations
+- [x] POST /ingest/markdown endpoint — walks local .md tree, authority by path pattern
+- [x] Freshness decay service — asyncio loop every 60s (DECAY_INTERVAL_SECONDS env var)
+  - Formula: T(t) = T_ambient + (T(t-1) - T_ambient) * exp(-k * delta_t), k=0.01/day
+  - Logs artifacts whose temperature shifts >0.01 per cycle
+- [x] Authority scoring — connector-level, verified: ADR=0.95, runbook=0.90, merged PR=0.85, closed PR=0.40
+- [x] Markdown connector — path-pattern authority scores (adr=0.95, runbook=0.90, readme=0.85, api-doc=0.80, changelog=0.80, docs/=0.65)
+- [x] freshness_warning field on query results — fires when temperature < 0.5, reports age in days/months
+- [x] contradiction_alert field on query results — always null until Day 3 contradiction detector
+- [x] requirements.txt frozen
+- [x] Day 1 fix: github.py omits Authorization header for public repos (was 401)
 
 ### TODO (Day 3)
 - [ ] Contradiction detection
