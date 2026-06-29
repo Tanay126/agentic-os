@@ -16,6 +16,7 @@ import chromadb
 from sentence_transformers import SentenceTransformer
 
 from ..models.event import Event
+from .contradiction import ContradictionDetector
 
 
 # Lazy-loaded so the model download doesn't block import
@@ -49,6 +50,7 @@ class IngestionService:
             name=self.COLLECTION_NAME,
             metadata={"hnsw:space": "cosine"},
         )
+        self._contradiction_detector = ContradictionDetector()
 
     def ingest_events(self, events: list[Event]) -> dict[str, Any]:
         """
@@ -95,6 +97,9 @@ class IngestionService:
             documents=texts,
             metadatas=metadatas,
         )
+
+        for artifact_id in ids:
+            self._contradiction_detector.scan_collection(artifact_id, self.collection)
 
         return {
             "received": len(events),
@@ -173,6 +178,13 @@ class IngestionService:
 
             freshness_warning = self._freshness_warning(meta)
 
+            contradiction_risk = float(meta.get("contradiction_risk", 0.0))
+            contradiction_alert = (
+                "This result conflicts with a newer source and may be outdated."
+                if contradiction_risk >= 0.5
+                else None
+            )
+
             results.append({
                 "artifact_id": meta.get("artifact_id", ""),
                 "title": meta.get("title", ""),
@@ -187,9 +199,10 @@ class IngestionService:
                     "authority": round(authority, 4),
                     "temperature": round(temperature, 4),
                 },
+                "contradiction_risk": round(contradiction_risk, 4),
                 "timestamp_event": meta.get("timestamp_event", ""),
                 "freshness_warning": freshness_warning,
-                "contradiction_alert": None,  # populated by Day 3 contradiction detector
+                "contradiction_alert": contradiction_alert,
             })
 
             if len(results) >= n_results:

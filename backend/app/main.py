@@ -20,11 +20,14 @@ from pydantic import BaseModel
 from .connectors.github import GitHubConnector
 from .connectors.markdown import MarkdownConnector
 from .services.ingestion import IngestionService
+from .services.voids import VoidDetector
+from .services.readiness import get_agent_readiness
 
 load_dotenv()
 
-# Shared service instance — initialized once during lifespan.
+# Shared service instances — initialized once during lifespan.
 _ingestion: IngestionService | None = None
+_void_detector: VoidDetector | None = None
 
 DECAY_INTERVAL_SECONDS = int(os.getenv("DECAY_INTERVAL_SECONDS", "60"))
 
@@ -41,9 +44,10 @@ async def _decay_loop() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _ingestion
+    global _ingestion, _void_detector
     data_dir = os.getenv("DATA_DIR", "./data")
     _ingestion = IngestionService(data_dir=data_dir)
+    _void_detector = VoidDetector()
     print(f"[startup] ChromaDB ready at {data_dir}/chroma")
     task = asyncio.create_task(_decay_loop())
     yield
@@ -99,6 +103,10 @@ class QueryResponse(BaseModel):
     count: int
 
 
+class ReadinessRequest(BaseModel):
+    workflow: str
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -109,6 +117,29 @@ def health() -> dict[str, str]:
     return {
         "status": "ok",
         "artifacts_indexed": str(collection_count),
+    }
+
+
+@app.get("/stats")
+def stats() -> dict[str, Any]:
+    """Return artifact count and temperature distribution for the dashboard."""
+    if _ingestion is None:
+        raise HTTPException(status_code=503, detail="Service not ready")
+
+    all_items = _ingestion.collection.get(include=["metadatas"])
+    metas = all_items["metadatas"] or []
+
+    hot = sum(1 for m in metas if float(m.get("temperature", 1.0)) > 0.8)
+    warm = sum(1 for m in metas if 0.5 < float(m.get("temperature", 1.0)) <= 0.8)
+    cold = sum(1 for m in metas if float(m.get("temperature", 1.0)) <= 0.5)
+
+    return {
+        "total_artifacts": len(metas),
+        "temperature_buckets": {
+            "hot": hot,    # > 0.8
+            "warm": warm,  # 0.5 – 0.8
+            "cold": cold,  # ≤ 0.5
+        },
     }
 
 
@@ -123,9 +154,9 @@ def ingest(req: IngestRequest) -> IngestResponse:
     events = connector.get_pull_requests(limit=req.limit)
     events += connector.get_issues(limit=req.limit)
 
-    stats = _ingestion.ingest_events(events)
+    stats_result = _ingestion.ingest_events(events)
     return IngestResponse(
-        stats=stats,
+        stats=stats_result,
         message=f"Ingested from {req.owner}/{req.repo}",
     )
 
@@ -141,9 +172,9 @@ def ingest_markdown(req: MarkdownIngestRequest) -> IngestResponse:
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
-    stats = _ingestion.ingest_events(events)
+    stats_result = _ingestion.ingest_events(events)
     return IngestResponse(
-        stats=stats,
+        stats=stats_result,
         message=f"Ingested markdown from {req.directory_path}",
     )
 
@@ -160,4 +191,25 @@ def query(req: QueryRequest) -> QueryResponse:
         tenant_id=req.tenant_id,
         n_results=req.n_results,
     )
+
+    if _void_detector is not None:
+        top_score = results[0]["scores"]["composite"] if results else 0.0
+        _void_detector.log_query(req.query, top_score)
+
     return QueryResponse(query=req.query, results=results, count=len(results))
+
+
+@app.get("/voids")
+def voids() -> dict[str, Any]:
+    """Return the top 10 knowledge void topics sorted by void_score."""
+    if _void_detector is None:
+        raise HTTPException(status_code=503, detail="Service not ready")
+    return {"voids": _void_detector.get_voids(top_n=10)}
+
+
+@app.post("/readiness")
+def readiness(req: ReadinessRequest) -> dict[str, Any]:
+    """Compute agent readiness score for executing a workflow."""
+    if _ingestion is None:
+        raise HTTPException(status_code=503, detail="Service not ready")
+    return get_agent_readiness(req.workflow, _ingestion)

@@ -73,6 +73,14 @@ uvicorn app.main:app --reload --port 8000
 ### Run Day 1 test
 python test_day1.py
 
+### Run Day 3 contradiction test
+python test_contradiction.py
+
+### Run the frontend (Day 3)
+cd /Users/tny/Desktop/agentic-os/frontend
+npm run dev
+# Dashboard available at http://localhost:5173
+
 ### Install new packages
 pip install <package> && pip freeze > requirements.txt
 
@@ -112,11 +120,28 @@ NEO4J_PASSWORD=agentikos
 - [x] requirements.txt frozen
 - [x] Day 1 fix: github.py omits Authorization header for public repos (was 401)
 
-### TODO (Day 3)
-- [ ] Contradiction detection
-- [ ] Knowledge void detector  
-- [ ] Agent readiness scoring
-- [ ] React dashboard (Vite)
+### DONE (Day 3)
+- [x] Contradiction detection — services/contradiction.py, ContradictionDetector
+  - Regex extraction: time durations, version strings, numeric thresholds
+  - scan_collection() flags the OLDER artifact at contradiction_risk=0.7
+  - Wired into IngestionService.ingest_events() — runs automatically on every ingest
+  - contradiction_alert populated in /query results when risk >= 0.5
+  - test_contradiction.py — PASSING
+- [x] Knowledge void detector — services/voids.py, VoidDetector
+  - Logs every /query call with its top composite score
+  - Void = topic queried 3+ times with avg composite score < 0.35
+  - GET /voids endpoint — top 10 void topics sorted by void_score
+- [x] Agent readiness scoring — services/readiness.py
+  - readiness = doc_coverage × freshness × contradiction_free
+  - POST /readiness endpoint — returns score, breakdown, recommendation
+  - Thresholds: > 0.7 "Safe to automate", 0.4–0.7 "Needs review", < 0.4 "Do not automate"
+- [x] React dashboard — frontend/ (Vite + React + Tailwind CSS)
+  - Panel 1: Knowledge Health — artifact count, temperature bar chart (hot/warm/cold)
+  - Panel 2: Query Interface — semantic search with score bars, freshness/contradiction alerts
+  - Panel 3: Knowledge Voids — ranked void list with void scores, "Create Doc" stub
+  - GET /stats endpoint added to main.py (artifact count + temperature buckets)
+
+### TODO (Day 3 remaining)
 - [ ] Neo4j Docker setup + graph relationships
 
 ### TODO (Days 9-12)
