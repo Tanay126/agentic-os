@@ -116,7 +116,11 @@ class ContradictionDetector:
                 continue
 
             similarity = max(0.0, 1.0 - s_dist)
-            if similarity < 0.4:
+            # Only compare documents that are highly semantically similar —
+            # a threshold of 0.75 ensures we're comparing same-topic docs.
+            # Lower thresholds produce false positives (e.g. two docs that
+            # both mention "days" for unrelated facts get flagged).
+            if similarity < 0.75:
                 continue
 
             if not self.detect(content, s_doc):
