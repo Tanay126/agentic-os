@@ -49,6 +49,20 @@ async def lifespan(app: FastAPI):
     _ingestion = IngestionService(data_dir=data_dir)
     _void_detector = VoidDetector()
     print(f"[startup] ChromaDB ready at {data_dir}/chroma")
+
+    # Auto-ingest demo docs on cold start so the Render deployment is
+    # immediately queryable without a manual /ingest call.
+    demo_docs_dir = os.getenv("DEMO_DOCS_DIR", "./demo_docs")
+    if _ingestion.collection.count() == 0 and os.path.isdir(demo_docs_dir):
+        print(f"[startup] Empty collection — ingesting demo docs from {demo_docs_dir}")
+        connector = MarkdownConnector(allowed_groups=["engineering"])
+        try:
+            events = connector.get_events(demo_docs_dir)
+            stats = _ingestion.ingest_events(events)
+            print(f"[startup] Demo docs ingested: {stats}")
+        except Exception as exc:
+            print(f"[startup] Demo ingest failed (non-fatal): {exc}")
+
     task = asyncio.create_task(_decay_loop())
     yield
     task.cancel()

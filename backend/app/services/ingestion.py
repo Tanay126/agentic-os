@@ -13,21 +13,22 @@ from datetime import datetime, timezone
 from typing import Any
 
 import chromadb
-from sentence_transformers import SentenceTransformer
+from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 
 from ..models.event import Event
 from .contradiction import ContradictionDetector
 
 
-# Lazy-loaded so the model download doesn't block import
-_model: SentenceTransformer | None = None
+# Shared ONNX-based embedding function — no PyTorch required, ~300MB RAM.
+# DefaultEmbeddingFunction wraps all-MiniLM-L6-v2 via onnxruntime.
+_embed: DefaultEmbeddingFunction | None = None
 
 
-def _get_model() -> SentenceTransformer:
-    global _model
-    if _model is None:
-        _model = SentenceTransformer("all-MiniLM-L6-v2")
-    return _model
+def _get_embed() -> DefaultEmbeddingFunction:
+    global _embed
+    if _embed is None:
+        _embed = DefaultEmbeddingFunction()
+    return _embed
 
 
 class IngestionService:
@@ -84,9 +85,9 @@ class IngestionService:
         if not to_ingest:
             return {"received": len(events), "upserted": 0, "skipped_empty": skipped}
 
-        model = _get_model()
+        embed = _get_embed()
         texts = [e.content for e in to_ingest]
-        embeddings = model.encode(texts, show_progress_bar=False).tolist()
+        embeddings = embed(texts)
 
         ids = [e.artifact_id for e in to_ingest]
         metadatas = [self._build_metadata(e) for e in to_ingest]
